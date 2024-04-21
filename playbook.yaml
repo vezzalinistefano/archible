@@ -1,0 +1,138 @@
+---
+- name: Install Arch Linux (pre setup)
+  hosts: all
+  remote_user: root
+
+  tasks:
+
+    - name: Set timezone
+      community.general.timezone:
+        name: "{{ timezone }}"
+
+    - name: Set ntp
+      ansible.builtin.command: /usr/bin/timedatectl set-ntp true
+
+    - name: Create and format EFI partition
+      community.general.parted:
+        device: /dev/{{ partitioning.deviceName }}
+        number: 1
+        fs_type: fat32
+        part_end: "{{ partitioning.efiSize }}"
+        state: present
+
+    - name: Create Swap partition
+      community.general.parted:
+        device: /dev/{{ partitioning.deviceName }}
+        number: 2
+        part_start: "{{ partitioning.efiSize }}" 
+        part_end: "{{ partitioning.swapSize }}"
+        state: present
+
+    - name: Format SWAP partition
+      community.general.filesystem:
+        dev: /dev/{{ partitioning.deviceName }}2
+        fstype: swap
+
+    - name: Create Root partition
+      community.general.parted:
+        device: /dev/{{ partitioning.deviceName }}
+        part_start: "{{ partitioning.swapSize }}" 
+        number: 3
+        part_end: 100%
+        state: present
+
+    - name: Format ROOT partition
+      community.general.filesystem:
+        dev: /dev/{{ partitioning.deviceName }}3
+        fstype: btrfs
+
+    - name: Grab the swap space used (in megabytes)
+      shell: free -m | grep Swap | awk '{print $2}'
+      register: swap_used
+
+    - name: Deal with the swap partition
+      command: |
+        swapoff -a
+        swapon /dev/{{ partitioning.deviceName}}2
+      when: (swap_used.stdout_lines[0] | int) > 100
+
+    - name: Create root btrfs subvolume
+      community.general.btrfs_subvolume:
+        name: /@
+        automount: true
+        filesystem_device: /dev/sda3
+        state: present
+
+    - name: Create home btrfs subvolume
+      community.general.btrfs_subvolume:
+        name: /@home
+        automount: true
+        filesystem_device: /dev/sda3
+        state: present
+
+    - name: Create snapshots btrfs subvolume
+      community.general.btrfs_subvolume:
+        name: /@snapshots
+        automount: true
+        filesystem_device: /dev/sda3
+        state: present
+
+    - name: Mount root
+      ansible.posix.mount:
+        path: /mnt
+        src: /dev/sda3
+        opts: subvol=/@,defaults,noatime,compress=zstd
+        fstype: btrfs
+        state: present
+
+    - name: Mount home
+      ansible.posix.mount:
+        path: /mnt/home
+        src: /dev/sda3
+        opts: subvol=/@home,defaults,noatime,compress=zstd
+        fstype: btrfs
+        state: present
+
+    - name: Mount snapshots
+      ansible.posix.mount:
+        path: /mnt/snapshots
+        src: /dev/sda3
+        opts: subvol=/@snapshots,defaults,noatime,compress=zstd
+        fstype: btrfs
+        state: present
+
+    - name: Update mirrors
+      command: |
+        /usr/bin/reflector \
+          --country Italy \
+          --age 12 \
+          --protocol https \
+          --fastest 5 \
+          --latest 20 \
+          --sort rate \
+          --save /etc/pacman.d/mirrorlist
+
+    - name: Make sure to have updated keyring
+      community.general.pacman:
+        name: archlinux-keyring
+        update_cache: true
+        state: present
+
+    - name: Pacstrap the base system packages
+      command: |
+        pacstrap -K /mnt \
+          linux \
+          linux-firmware \
+          nano \
+          neovim
+
+- name: Arch Linux chroot
+  connection: community.general.chroot
+  hosts: all
+  vars:
+    ansible_chroot_exe: arch-chroot
+  tasks:
+
+    - name: Find
+      find:
+        paths: /

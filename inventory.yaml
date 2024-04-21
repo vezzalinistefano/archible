@@ -1,0 +1,9 @@
+all:
+  hosts:
+    192.168.0.72
+  vars:
+    timezone: Europe/Rome
+    partitioning:
+      deviceName: sda
+      efiSize: 300MB
+      swapSize: 2GB
